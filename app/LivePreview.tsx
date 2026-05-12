@@ -1,6 +1,13 @@
 "use client";
 
-import { CSSProperties } from "react";
+import { CSSProperties, useEffect, useRef, useState } from "react";
+import { toBlob } from "html-to-image";
+import { injectPngDpi } from "@/lib/png-dpi";
+
+const SOURCE_WIDTH = 600;
+const SOURCE_HEIGHT = 1800;
+const DISPLAY_WIDTH = 256;
+const DISPLAY_HEIGHT = 768;
 
 type Decoration =
   | "corners"
@@ -419,66 +426,225 @@ export function LivePreview({
   presetLabel?: string;
   providerLabel?: string;
 }) {
+  const sourceRef = useRef<HTMLDivElement>(null);
+  const [pngUrl, setPngUrl] = useState<string | null>(null);
+  const [rendering, setRendering] = useState(false);
+  const lastUrlRef = useRef<string | null>(null);
+
   const style = (presetId && STYLES[presetId]) || DEFAULT_STYLE;
   const trimmed = idea.trim();
+
+  useEffect(() => {
+    let cancelled = false;
+    setRendering(true);
+    const handle = window.setTimeout(async () => {
+      const node = sourceRef.current;
+      if (!node) return;
+      try {
+        const blob = await toBlob(node, {
+          width: SOURCE_WIDTH,
+          height: SOURCE_HEIGHT,
+          pixelRatio: 1,
+          cacheBust: true,
+          backgroundColor: "#ffffff",
+        });
+        if (cancelled || !blob) return;
+        const withDpi = await injectPngDpi(blob, 300);
+        const url = URL.createObjectURL(withDpi);
+        if (lastUrlRef.current) URL.revokeObjectURL(lastUrlRef.current);
+        lastUrlRef.current = url;
+        if (!cancelled) setPngUrl(url);
+      } catch (e) {
+        console.error("Preview rasterize failed:", e);
+      } finally {
+        if (!cancelled) setRendering(false);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [idea, presetId]);
+
+  useEffect(
+    () => () => {
+      if (lastUrlRef.current) URL.revokeObjectURL(lastUrlRef.current);
+    },
+    [],
+  );
+
+  async function downloadAsFile() {
+    if (!pngUrl) return;
+    const a = document.createElement("a");
+    const name = (trimmed || "bookmark")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 40);
+    a.href = pngUrl;
+    a.download = `${name || "bookmark"}-${presetId ?? "design"}.png`;
+    a.click();
+  }
 
   return (
     <div className="space-y-3">
       <div className="flex items-baseline justify-between">
         <h2 className="text-sm font-medium">Live preview</h2>
         <span className="text-xs text-neutral-500">
-          {presetLabel ? presetLabel : "Pick a style"}
+          {presetLabel ?? "Pick a style"}
           {providerLabel ? ` · ${providerLabel}` : ""}
         </span>
       </div>
 
       <div className="flex flex-col items-center">
         <div
-          className="bookmark-frame w-64 relative overflow-hidden"
-          style={{ background: style.bg } as CSSProperties}
+          className="bookmark-frame relative"
+          style={{ width: DISPLAY_WIDTH, height: DISPLAY_HEIGHT }}
         >
-          <Decorations decoration={style.decoration} accent={style.accent} />
-
-          {style.showQuote && trimmed && (
-            <div className="absolute inset-x-5 inset-y-10 flex items-center justify-center text-center">
-              <p
-                className={`text-[15px] leading-snug ${fontClass[style.font]}`}
-                style={{ color: style.textColor }}
-              >
-                &ldquo;{trimmed}&rdquo;
-              </p>
-            </div>
-          )}
-
-          {style.showQuote && !trimmed && (
-            <div className="absolute inset-0 flex items-center justify-center">
-              <span className="text-xs uppercase tracking-widest opacity-50" style={{ color: style.textColor }}>
-                your quote
-              </span>
-            </div>
-          )}
-
-          {!style.showQuote && (
-            <div className="absolute bottom-4 left-3 right-3 text-center">
-              <div
-                className={`text-[10px] uppercase tracking-widest opacity-60 ${fontClass[style.font]}`}
-                style={{ color: style.textColor }}
-              >
-                {style.captionPrefix ?? "preview"}
-              </div>
-              <div
-                className={`text-[13px] leading-tight mt-0.5 ${fontClass[style.font]}`}
-                style={{ color: style.textColor }}
-              >
-                {trimmed || "your idea"}
-              </div>
-            </div>
+          {pngUrl ? (
+            <img
+              src={pngUrl}
+              width={DISPLAY_WIDTH}
+              height={DISPLAY_HEIGHT}
+              alt="Bookmark preview — right-click to save"
+              className="w-full h-full block"
+              style={{
+                opacity: rendering ? 0.85 : 1,
+                transition: "opacity .15s ease-out",
+              }}
+            />
+          ) : (
+            <div className="w-full h-full bg-neutral-100 animate-pulse" />
           )}
         </div>
-        <p className="text-[11px] text-neutral-500 mt-2">2&quot; × 6&quot; · 600 × 1800 px @ 300 DPI</p>
+        <p className="text-[11px] text-neutral-500 mt-2 text-center max-w-xs">
+          Right-click → <i>Save image as…</i> for a 600 × 1800 px PNG @ 300 DPI (exactly 2&quot; × 6&quot;).
+        </p>
+        <button
+          onClick={downloadAsFile}
+          disabled={!pngUrl}
+          className="mt-2 text-xs px-3 py-1.5 rounded border border-ink-100 hover:border-neutral-400 disabled:text-neutral-400"
+        >
+          Download PNG
+        </button>
+      </div>
+
+      {/* Hidden 600x1800 source — rasterized into the visible img above. */}
+      <div
+        ref={sourceRef}
+        aria-hidden
+        style={{
+          position: "fixed",
+          left: "-99999px",
+          top: 0,
+          width: SOURCE_WIDTH,
+          height: SOURCE_HEIGHT,
+          background: style.bg,
+          overflow: "hidden",
+          pointerEvents: "none",
+          fontFamily: cssFontFamily(style.font),
+          color: style.textColor,
+        }}
+      >
+        <Decorations decoration={style.decoration} accent={style.accent} />
+
+        {style.showQuote && trimmed && (
+          <div
+            style={{
+              position: "absolute",
+              top: "10%",
+              bottom: "10%",
+              left: "8%",
+              right: "8%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              textAlign: "center",
+            }}
+          >
+            <p
+              style={{
+                fontSize: 44,
+                lineHeight: 1.22,
+                margin: 0,
+                fontStyle: style.font === "script" ? "italic" : "normal",
+              }}
+            >
+              &ldquo;{trimmed}&rdquo;
+            </p>
+          </div>
+        )}
+
+        {style.showQuote && !trimmed && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <span
+              style={{
+                fontSize: 24,
+                textTransform: "uppercase",
+                letterSpacing: "0.2em",
+                opacity: 0.45,
+              }}
+            >
+              your quote
+            </span>
+          </div>
+        )}
+
+        {!style.showQuote && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: 60,
+              left: 36,
+              right: 36,
+              textAlign: "center",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 22,
+                textTransform: "uppercase",
+                letterSpacing: "0.25em",
+                opacity: 0.6,
+                fontStyle: style.font === "script" ? "italic" : "normal",
+              }}
+            >
+              {style.captionPrefix ?? "preview"}
+            </div>
+            <div
+              style={{
+                fontSize: 34,
+                lineHeight: 1.1,
+                marginTop: 8,
+                fontStyle: style.font === "script" ? "italic" : "normal",
+              }}
+            >
+              {trimmed || "your idea"}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+function cssFontFamily(f: FontFamily): string {
+  switch (f) {
+    case "serif":
+      return 'Georgia, "Times New Roman", serif';
+    case "sans":
+      return 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+    case "script":
+      return '"Brush Script MT", "Lucida Handwriting", "Apple Chancery", cursive';
+  }
 }
 
 function Decorations({ decoration, accent }: { decoration: Decoration; accent: string }) {
@@ -666,17 +832,22 @@ function Decorations({ decoration, accent }: { decoration: Decoration; accent: s
 
 function Corner({ pos, color }: { pos: "tl" | "tr" | "bl" | "br"; color: string }) {
   const rotate = { tl: 0, tr: 90, br: 180, bl: 270 }[pos];
-  const cls = {
-    tl: "top-1.5 left-1.5",
-    tr: "top-1.5 right-1.5",
-    bl: "bottom-1.5 left-1.5",
-    br: "bottom-1.5 right-1.5",
+  const positional: CSSProperties = {
+    tl: { top: "1.5%", left: "5%" },
+    tr: { top: "1.5%", right: "5%" },
+    bl: { bottom: "1.5%", left: "5%" },
+    br: { bottom: "1.5%", right: "5%" },
   }[pos];
   return (
     <svg
       viewBox="0 0 24 24"
-      className={`absolute w-5 h-5 ${cls}`}
-      style={{ transform: `rotate(${rotate}deg)` }}
+      style={{
+        position: "absolute",
+        width: "12%",
+        aspectRatio: "1 / 1",
+        transform: `rotate(${rotate}deg)`,
+        ...positional,
+      }}
     >
       <path d="M2 14 V2 H14" stroke={color} strokeWidth={1.1} fill="none" />
       <path d="M5 11 V5 H11" stroke={color} strokeWidth={0.8} fill="none" />
